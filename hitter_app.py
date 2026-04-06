@@ -40,7 +40,7 @@ try:
 except Exception:
     _REQ_EXC = (Exception,)
 
-APP_VERSION = "v1.0"
+APP_VERSION = "v1.1"
 
 st.set_page_config(
     page_title="Hitter Dashboard",
@@ -91,8 +91,8 @@ PITCH_COLORS = {
 PITCH_NAMES = {
     "FF": "4-Seam Fastball", "SI": "Sinker", "FT": "2-Seam Fastball",
     "FC": "Cutter", "CH": "Changeup", "FS": "Splitter", "FO": "Forkball",
-    "SC": "Screwball", "SL": "Slider", "ST": "Sweeper", "SV": "Slurve",
-    "CU": "Curveball", "KC": "Knuckle Curve", "KN": "Knuckleball", "CS": "Slow Curve",
+    "SC": "Screwball", "SL": "Slider", "ST": "Sweeper", "SV": "Curveball",
+    "CU": "Curveball", "KC": "Knuckle Curve", "KN": "Knuckleball", "CS": "Curveball",
 }
 
 INVALID_PITCH_TYPES = {"", "None", "nan", "NaN", "PO"}
@@ -237,14 +237,14 @@ def load_hitter_dropdown():
     reg = reg[reg["display"].astype(str).str.len() > 0].copy()
     reg = reg.drop_duplicates(subset=["display", "key_mlbam"], keep="first")
 
-    # Filter to 2023+ batters via FanGraphs
+    # Filter to 2023+ batters only via FanGraphs batting stats
     try:
-        from pybaseball import batting_stats
+        from pybaseball import batting_stats as _bat_stats
         recent_ids = set()
         recent_names = set()
         for yr in [2023, 2024, 2025]:
             try:
-                df_fg = batting_stats(yr, qual=0)
+                df_fg = _bat_stats(yr, qual=0)
                 if df_fg is not None and not df_fg.empty:
                     id_cols = [c for c in ["IDfg", "idfg", "playerid"] if c in df_fg.columns]
                     if id_cols:
@@ -286,7 +286,7 @@ def fetch_statcast_batter(mlbam_id, start_date, end_date, allowed_gt):
         df = pd.DataFrame(df) if df is not None else pd.DataFrame()
         df = filter_game_types(df, allowed_gt)
         return df
-    return memo_by_params("sc_batter_v10", (APP_VERSION, mlbam_id, start_date, end_date, tuple(sorted(list(allowed_gt))), today), _build)
+    return memo_by_params("sc_batter_v11", (APP_VERSION, mlbam_id, start_date, end_date, tuple(sorted(list(allowed_gt))), today), _build)
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_statcast_league(start_date, end_date, allowed_gt):
@@ -302,7 +302,7 @@ def fetch_fg_batting_year(year):
             return pd.DataFrame(df) if df is not None else pd.DataFrame()
         except Exception:
             return pd.DataFrame()
-    return memo_by_params("fg_batting_v10", (APP_VERSION, year), _build)
+    return memo_by_params("fg_batting_v11", (APP_VERSION, year), _build)
 
 # =========================================================
 # Feature engineering
@@ -311,6 +311,10 @@ def add_helpers(df):
     df = df.copy()
     if "game_date" in df.columns:
         df["game_date"] = pd.to_datetime(df["game_date"], errors="coerce")
+
+    if "pfx_x" in df.columns and "pfx_z" in df.columns:
+        df["HB_in"]  = -safe_num(df["pfx_x"]) * 12.0
+        df["iVB_in"] = safe_num(df["pfx_z"]) * 12.0
 
     if "description" in df.columns:
         df["is_swing"]   = df["description"].isin(SWING_DESCRIPTIONS)
@@ -456,32 +460,37 @@ def compute_batted_ball(df):
     if df is None or df.empty:
         return {}
     bbe = df.dropna(subset=["launch_speed", "launch_angle"]).copy() if require_cols(df, ["launch_speed", "launch_angle"]) else pd.DataFrame()
+    # BIP only - true batted balls (excludes foul tips etc)
+    bip = bbe[bbe["bb_type"].notna()].copy() if "bb_type" in bbe.columns else bbe
 
     out = {}
     if not bbe.empty:
         ev = safe_num(bbe["launch_speed"])
         la = safe_num(bbe["launch_angle"])
-        out["Avg EV"]    = round(float(ev.mean()), 1) if ev.notna().any() else None
-        out["90th EV"]   = round(float(ev.quantile(0.9)), 1) if ev.notna().any() else None
-        out["Max EV"]    = round(float(ev.max()), 1) if ev.notna().any() else None
-        out["Avg LA"]    = round(float(la.mean()), 1) if la.notna().any() else None
-        out["HardHit%"]  = round(float((ev >= 95).mean()*100), 1) if ev.notna().any() else None
-        out["Barrel%"]   = round(float(sum(is_barrel(float(e), float(l)) for e, l in zip(ev, la))/len(bbe)*100), 1)
-        out["SweetSpot%"] = round(float(((la >= 8) & (la <= 32)).mean()*100), 1)
+        bip_ev = safe_num(bip["launch_speed"]) if not bip.empty else ev
+        bip_la = safe_num(bip["launch_angle"]) if not bip.empty else la
+        out["Avg EV"]    = round(float(bip_ev.mean()), 1) if bip_ev.notna().any() else None
+        out["90th EV"]   = round(float(bip_ev.quantile(0.9)), 1) if bip_ev.notna().any() else None
+        out["Max EV"]    = round(float(bip_ev.max()), 1) if bip_ev.notna().any() else None
+        out["Avg LA"]    = round(float(bip_la.mean()), 1) if bip_la.notna().any() else None
+        out["HardHit%"]  = round(float((bip_ev >= 95).mean()*100), 1) if bip_ev.notna().any() else None
+        bip_la = safe_num(bip["launch_angle"]) if not bip.empty else la
+        out["Barrel%"]   = round(float(sum(is_barrel(float(e), float(l)) for e, l in zip(bip_ev, bip_la))/len(bip)*100), 1) if not bip.empty else None
+        out["SweetSpot%"] = round(float(((bip_la >= 8) & (bip_la <= 32)).mean()*100), 1) if not bip.empty else None
 
-        # AirPull% - pulled fly balls / all fly balls
-        if "bb_type" in df.columns and "hit_location" in df.columns:
-            fly = df[df["bb_type"] == "fly_ball"].copy()
-            if not fly.empty:
-                # Pulled = hit_location 1-3 for RHB (left side), 7-9 for LHB (right side)
-                # Use stand column
-                if "stand" in df.columns:
-                    stand = fly["stand"].fillna("R").astype(str)
-                    loc = safe_num(fly["hit_location"])
-                    pulled_r = (stand == "R") & loc.isin([1,2,3,4])
-                    pulled_l = (stand == "L") & loc.isin([6,7,8,9])
-                    pulled = (pulled_r | pulled_l).sum()
-                    out["AirPull%"] = round(float(pulled/len(fly)*100), 1) if len(fly) else None
+        # AirPull% - pulled LD/FB / all BIP, 15deg threshold matching Savant
+        if "bb_type" in df.columns and "hc_x" in df.columns and "hc_y" in df.columns and "stand" in df.columns:
+            ld_fb = df[df["bb_type"].isin(["line_drive","fly_ball"])].dropna(subset=["hc_x","hc_y","stand"]).copy()
+            all_bip = df[df["bb_type"].isin(["ground_ball","line_drive","fly_ball","popup"])].dropna(subset=["hc_x","hc_y"])
+            if not ld_fb.empty and len(all_bip):
+                lx = safe_num(ld_fb["hc_x"])
+                ly = safe_num(ld_fb["hc_y"])
+                lspray = np.degrees(np.arctan((lx - 125.42) / (198.27 - ly))) * 0.75
+                lst = ld_fb["stand"].astype(str)
+                pulled = ((lst == "R") & (lspray < -15)) | ((lst == "L") & (lspray > 15))
+                out["AirPull%"] = round(float(pulled.sum() / len(all_bip) * 100), 1)
+            else:
+                out["AirPull%"] = None
 
     if "bb_type" in df.columns:
         bt = df["bb_type"].fillna("").astype(str)
@@ -604,8 +613,30 @@ def compute_pitch_type_stats(df):
             "HardHit%": hard_hit,
             "Barrel%":  barrel,
             "xwOBA":    xwoba_v,
+            "Heart Swing%": pd_stats.get("Heart Swing%") if pd_stats else None,
+            "Heart Contact%": pd_stats.get("Heart Contact%") if pd_stats else None,
         })
 
+    # Add Overall row at bottom
+    overall_pd = compute_plate_discipline(vp, "Overall")
+    overall_bb = compute_batted_ball(vp)
+    overall_xwoba = float(safe_num(vp["estimated_woba_using_speedangle"]).dropna().mean()) if "estimated_woba_using_speedangle" in vp.columns else None
+    rows.append({
+        "Pitch": "Overall",
+        "Pitch%": 100.0,
+        "Pitches": len(vp),
+        "Swing%": overall_pd.get("Swing%") if overall_pd else None,
+        "Whiff%": overall_pd.get("Whiff%") if overall_pd else None,
+        "Chase%": overall_pd.get("Chase%") if overall_pd else None,
+        "Z-Swing%": overall_pd.get("Z-Swing%") if overall_pd else None,
+        "Z-Contact%": overall_pd.get("Z-Contact%") if overall_pd else None,
+        "Avg EV": overall_bb.get("Avg EV"),
+        "HardHit%": overall_bb.get("HardHit%"),
+        "Barrel%": overall_bb.get("Barrel%"),
+        "xwOBA": round(overall_xwoba, 3) if overall_xwoba else None,
+        "Heart Swing%": overall_pd.get("Heart Swing%") if overall_pd else None,
+        "Heart Contact%": overall_pd.get("Heart Contact%") if overall_pd else None,
+    })
     out = pd.DataFrame(rows).sort_values("Pitches", ascending=False).reset_index(drop=True)
     return out
 
@@ -643,8 +674,29 @@ def compute_pitch_group_stats(df):
             "HardHit%": bb_stats.get("HardHit%"),
             "Barrel%":  bb_stats.get("Barrel%"),
             "xwOBA":    xwoba_v,
+            "Heart Swing%": pd_stats.get("Heart Swing%") if pd_stats else None,
+            "Heart Contact%": pd_stats.get("Heart Contact%") if pd_stats else None,
         })
 
+    # Add Overall row
+    overall_pd = compute_plate_discipline(vp, "Overall")
+    overall_bb = compute_batted_ball(vp)
+    overall_xwoba = float(safe_num(vp["estimated_woba_using_speedangle"]).dropna().mean()) if "estimated_woba_using_speedangle" in vp.columns else None
+    rows.append({
+        "Group": "Overall",
+        "Pitches": len(vp),
+        "Swing%": overall_pd.get("Swing%") if overall_pd else None,
+        "Whiff%": overall_pd.get("Whiff%") if overall_pd else None,
+        "Chase%": overall_pd.get("Chase%") if overall_pd else None,
+        "Z-Swing%": overall_pd.get("Z-Swing%") if overall_pd else None,
+        "Z-Contact%": overall_pd.get("Z-Contact%") if overall_pd else None,
+        "Avg EV": overall_bb.get("Avg EV"),
+        "HardHit%": overall_bb.get("HardHit%"),
+        "Barrel%": overall_bb.get("Barrel%"),
+        "xwOBA": round(overall_xwoba, 3) if overall_xwoba else None,
+        "Heart Swing%": overall_pd.get("Heart Swing%") if overall_pd else None,
+        "Heart Contact%": overall_pd.get("Heart Contact%") if overall_pd else None,
+    })
     return pd.DataFrame(rows)
 
 # =========================================================
@@ -683,18 +735,11 @@ def build_season_summary(fg_id, mlbam_id, display_name, current_year, allowed_gt
         except Exception:
             pass
 
-        # Bat speed from Statcast
-        bat_speed = None
-        try:
-            s, e = season_window(yr)
-            sc_y = fetch_statcast_batter(mlbam_id, s, e, allowed_gt={"R"})
-            if sc_y is not None and not sc_y.empty and "bat_speed" in sc_y.columns:
-                bs = safe_num(sc_y["bat_speed"]).dropna()
-                bat_speed = round(float(bs.mean()), 1) if len(bs) else None
-        except Exception:
-            pass
-
         ip = _n("PA")
+        k_raw = _n("K%")
+        bb_raw = _n("BB%")
+        k_pct = round(float(k_raw)*100, 1) if pd.notna(k_raw) and float(k_raw) <= 1.0 else (round(float(k_raw),1) if pd.notna(k_raw) else np.nan)
+        bb_pct = round(float(bb_raw)*100, 1) if pd.notna(bb_raw) and float(bb_raw) <= 1.0 else (round(float(bb_raw),1) if pd.notna(bb_raw) else np.nan)
         rows.append({
             "Season": yr,
             "PA": int(ip) if pd.notna(ip) else "—",
@@ -702,9 +747,10 @@ def build_season_summary(fg_id, mlbam_id, display_name, current_year, allowed_gt
             "OBP": round(float(_n("OBP")), 3) if pd.notna(_n("OBP")) else np.nan,
             "SLG": round(float(_n("SLG")), 3) if pd.notna(_n("SLG")) else np.nan,
             "OPS": round(float(_n("OPS")), 3) if pd.notna(_n("OPS")) else np.nan,
+            "K%": k_pct,
+            "BB%": bb_pct,
             "wOBA": round(float(_n("wOBA")), 3) if pd.notna(_n("wOBA")) else np.nan,
             "xwOBA": xwoba_sc if xwoba_sc else np.nan,
-            "Bat Speed": bat_speed if bat_speed else np.nan,
         })
 
     return pd.DataFrame(rows)
@@ -722,6 +768,19 @@ def compute_league_baselines(lg_df):
 
     baselines = {}
     all_stats = {}
+
+    def _compute_airpull(g):
+        if "bb_type" not in g.columns or "hc_x" not in g.columns or "hc_y" not in g.columns or "stand" not in g.columns:
+            return np.nan
+        ld_fb = g[g["bb_type"].isin(["line_drive","fly_ball"])].dropna(subset=["hc_x","hc_y","stand"]).copy()
+        all_bip = g[g["bb_type"].isin(["ground_ball","line_drive","fly_ball","popup"])].dropna(subset=["hc_x","hc_y"])
+        if ld_fb.empty or len(all_bip) == 0:
+            return np.nan
+        lx = safe_num(ld_fb["hc_x"]); ly = safe_num(ld_fb["hc_y"])
+        lspray = np.degrees(np.arctan((lx-125.42)/(198.27-ly)))*0.75
+        lst = ld_fb["stand"].astype(str)
+        pulled = ((lst=="R")&(lspray<-15))|((lst=="L")&(lspray>15))
+        return round(float(pulled.sum()/len(all_bip)*100),1)
 
     def rate_block(g):
         pitches = len(g)
@@ -744,16 +803,46 @@ def compute_league_baselines(lg_df):
 
         xwoba_v = float(safe_num(g["estimated_woba_using_speedangle"]).dropna().mean()) if "estimated_woba_using_speedangle" in g.columns else np.nan
 
+        # Bat tracking stats
+        bip_mask = g["bb_type"].notna() if "bb_type" in g.columns else pd.Series([False]*len(g))
+        bat_spd = float(safe_num(g["bat_speed"]).dropna().mean()) if "bat_speed" in g.columns else np.nan
+        bat_spd_bip = float(safe_num(g.loc[bip_mask, "bat_speed"]).dropna().mean()) if "bat_speed" in g.columns else np.nan
+        swing_len = float(safe_num(g["swing_length"]).dropna().mean()) if "swing_length" in g.columns else np.nan
+        bs_all = safe_num(g["bat_speed"]).dropna() if "bat_speed" in g.columns else pd.Series(dtype=float)
+        fast_swing = float((bs_all >= 75).mean()*100) if len(bs_all) else np.nan
+        # Batted ball types
+        if not bbe.empty and "bb_type" in bbe.columns:
+            bip_bbe = bbe[bbe["bb_type"].notna()]
+            gb_pct = float((bip_bbe["bb_type"]=="ground_ball").sum()/len(bip_bbe)*100) if len(bip_bbe) else np.nan
+            ld_pct = float((bip_bbe["bb_type"]=="line_drive").sum()/len(bip_bbe)*100) if len(bip_bbe) else np.nan
+            fb_pct = float((bip_bbe["bb_type"]=="fly_ball").sum()/len(bip_bbe)*100) if len(bip_bbe) else np.nan
+            la_vals = safe_num(bip_bbe["launch_angle"])
+            sweet = float(((la_vals >= 8) & (la_vals <= 32)).mean()*100) if len(la_vals) else np.nan
+        else:
+            gb_pct = ld_pct = fb_pct = sweet = np.nan
+
         return {
-            "Swing%":     (swings/pitches*100, 8.0),
-            "Whiff%":     (whiffs/swings*100 if swings else np.nan, 8.0),
-            "Chase%":     (chases/oz_pitches*100 if oz_pitches else np.nan, 6.0),
-            "Z-Swing%":   (z_swings/z_pitches*100 if z_pitches else np.nan, 7.0),
-            "Z-Contact%": (z_contacts/z_swings*100 if z_swings else np.nan, 7.0),
-            "Avg EV":     (avg_ev, 3.0),
-            "HardHit%":   (hh, 7.0),
-            "Barrel%":    (barrel_pct, 3.0),
-            "xwOBA":      (xwoba_v, 0.040),
+            "Swing%":       (swings/pitches*100, 8.0),
+            "Whiff%":       (whiffs/swings*100 if swings else np.nan, 8.0),
+            "Chase%":       (chases/oz_pitches*100 if oz_pitches else np.nan, 6.0),
+            "Z-Swing%":     (z_swings/z_pitches*100 if z_pitches else np.nan, 7.0),
+            "Z-Contact%":   (z_contacts/z_swings*100 if z_swings else np.nan, 7.0),
+            "Avg EV":       (avg_ev, 3.0),
+            "HardHit%":     (hh, 7.0),
+            "Barrel%":      (barrel_pct, 3.0),
+            "xwOBA":        (xwoba_v, 0.040),
+            "Bat Speed":    (bat_spd, 2.0),
+            "Bat Spd (BIP)": (bat_spd_bip, 2.0),
+            "Swing Length": (swing_len, 0.3),
+            "Fast Swing%":  (fast_swing, 5.0),
+            "SweetSpot%":   (sweet, 5.0),
+            "GB%":          (gb_pct, 5.0),
+            "LD%":          (ld_pct, 4.0),
+            "FB%":          (fb_pct, 4.0),
+            "90th EV":      (np.nan, 3.0),
+            "Max EV":       (np.nan, 3.0),
+            "Avg LA":       (np.nan, 5.0),
+            "AirPull%":     (_compute_airpull(g), 5.0),
         }
 
     all_rates = rate_block(vp)
@@ -899,7 +988,7 @@ def main():
         today = dt.date.today()
         default_year = today.year
 
-        season_year = st.selectbox("Season year", options=[2026], index=0)
+        season_year = st.selectbox("Season year", options=[2026, 2025], index=0)
 
         if use_manual:
             mlbam_id    = int(manual_id)
@@ -919,13 +1008,21 @@ def main():
         include_post = st.checkbox("Include Postseason",      value=False)
         allowed_gt   = allowed_game_types(include_st=include_st, include_post=include_post)
 
-        # Auto-set dates
+        # Auto-set dates to first game of season
         auto_key = f"auto_dates_h::{APP_VERSION}::{mlbam_id}::{season_year}::{include_st}::{include_post}"
         if _ss_get("auto_key_h") != auto_key:
-            s0, e0 = season_window(season_year)
-            _ss_set("start_date_h", dt.date.fromisoformat(s0))
-            _ss_set("end_date_h",   today)
-            _ss_set("auto_key_h",   auto_key)
+            # Try to find first game of season for this hitter
+            try:
+                _test = fetch_statcast_batter(mlbam_id, f"{season_year}-03-25", f"{season_year}-04-30", frozenset({"R"}))
+                if _test is not None and not _test.empty and "game_date" in _test.columns:
+                    _first = pd.to_datetime(_test["game_date"], errors="coerce").dropna().min().date()
+                    _ss_set("start_date_h", _first)
+                else:
+                    _ss_set("start_date_h", dt.date(season_year, 3, 25))
+            except Exception:
+                _ss_set("start_date_h", dt.date(season_year, 3, 25))
+            _ss_set("end_date_h", today)
+            _ss_set("auto_key_h", auto_key)
 
         start_date = st.date_input("Start date", key="start_date_h")
         end_date   = st.date_input("End date",   key="end_date_h")
@@ -935,7 +1032,7 @@ def main():
 
         st.divider()
         league_compare = st.checkbox("Compare to league", value=True)
-        baseline_days  = st.slider("League baseline window (days)", 7, 90, 30, step=1)
+        baseline_days = 30  # kept for compat
 
         st.divider()
         run_btn = st.button("Run / Refresh Data", type="primary")
@@ -973,11 +1070,11 @@ def main():
 
         baselines = {}
         if league_compare:
-            base_end   = end_date
-            base_start = max(start_date, base_end - dt.timedelta(days=int(baseline_days)))
-            with st.spinner(f"Fetching league data ({baseline_days}d window)..."):
+            base_start_str = f"{end_date.year}-03-25"
+            base_end_str = end_date.strftime("%Y-%m-%d")
+            with st.spinner("Fetching league data (season baseline)..."):
                 try:
-                    lg = fetch_statcast_league(base_start.strftime("%Y-%m-%d"), base_end.strftime("%Y-%m-%d"), frozenset(allowed_gt))
+                    lg = fetch_statcast_league(base_start_str, base_end_str, frozenset(allowed_gt))
                     if lg is not None and not lg.empty:
                         baselines = compute_league_baselines(lg)
                 except Exception:
@@ -1031,11 +1128,86 @@ def main():
         if ssdf.empty:
             st.info("No season summary available.")
         else:
-            fmt = {"AVG":"{:.3f}","OBP":"{:.3f}","SLG":"{:.3f}","OPS":"{:.3f}",
-                   "wOBA":"{:.3f}","xwOBA":"{:.3f}","Bat Speed":"{:.1f}","PA":"{:.0f}"}
+            fmt_all = {"PA":"{:.0f}","AVG":"{:.3f}","OBP":"{:.3f}","SLG":"{:.3f}","OPS":"{:.3f}",
+                   "K%":"{:.1f}","BB%":"{:.1f}","wOBA":"{:.3f}","xwOBA":"{:.3f}"}
+            fmt = {k: v for k, v in fmt_all.items() if k in ssdf.columns and pd.to_numeric(ssdf[k], errors="coerce").notna().any()}
             st.dataframe(ssdf.style.format(fmt, na_rep="—"), use_container_width=True, hide_index=True)
 
-        st.caption("FanGraphs + Statcast (xwOBA, Bat Speed).")
+        st.caption("FanGraphs + Statcast (xwOBA).")
+
+        # Platoon splits
+        st.markdown("#### Platoon Splits")
+        def compute_platoon_splits_h(sc, hand):
+            df = sc[sc["stand"] == hand].copy() if "stand" in sc.columns else pd.DataFrame()
+            if df.empty:
+                return None
+            pa_end = df.groupby(["game_pk","at_bat_number"])["pitch_number"].idxmax() if require_cols(df,["game_pk","at_bat_number","pitch_number"]) else pd.Index([])
+            pa_df = df.loc[pa_end] if len(pa_end) else pd.DataFrame()
+            evs = pa_df["events"].fillna("").astype(str) if not pa_df.empty and "events" in pa_df.columns else pd.Series(dtype=str)
+            h = int(evs.isin(["single","double","triple","home_run"]).sum())
+            hr = int((evs=="home_run").sum())
+            so = int(evs.isin(["strikeout","strikeout_double_play"]).sum())
+            bb = int(evs.isin(["walk","intent_walk"]).sum())
+            hbp = int((evs=="hit_by_pitch").sum())
+            non_ab = {"walk","intent_walk","hit_by_pitch","sac_fly","sac_bunt","catcher_interf"}
+            ab = int((~evs.isin(list(non_ab)) & evs.ne("")).sum())
+            pa = ab + bb + hbp
+            doubles = int((evs=="double").sum())
+            triples = int((evs=="triple").sum())
+            tb = h - hr - doubles - triples + 2*doubles + 3*triples + 4*hr
+            avg = h/ab if ab else None
+            obp = (h+bb+hbp)/pa if pa else None
+            slg = tb/ab if ab else None
+            ops = (obp or 0)+(slg or 0) if obp is not None and slg is not None else None
+            k_pct = so/pa*100 if pa else None
+            bb_pct = bb/pa*100 if pa else None
+            ev = float(safe_num(df["launch_speed"]).dropna().mean()) if "launch_speed" in df.columns else None
+            xwoba = float(safe_num(df["estimated_woba_using_speedangle"]).dropna().mean()) if "estimated_woba_using_speedangle" in df.columns else None
+            return {"Split": f"vs {hand}HP", "PA": pa, "K%": round(k_pct,1) if k_pct else np.nan,
+                    "BB%": round(bb_pct,1) if bb_pct else np.nan, "AVG": round(avg,3) if avg else np.nan,
+                    "OBP": round(obp,3) if obp else np.nan, "SLG": round(slg,3) if slg else np.nan,
+                    "OPS": round(ops,3) if ops else np.nan, "EV": round(ev,1) if ev else np.nan,
+                    "xwOBA": round(xwoba,3) if xwoba else np.nan}
+        # Split by pitcher hand (p_throws), not batter hand
+        def compute_platoon_splits_p(sc, p_hand):
+            df = sc[sc["p_throws"] == p_hand].copy() if "p_throws" in sc.columns else pd.DataFrame()
+            if df.empty:
+                return None
+            pa_end = df.groupby(["game_pk","at_bat_number"])["pitch_number"].idxmax() if require_cols(df,["game_pk","at_bat_number","pitch_number"]) else pd.Index([])
+            pa_df = df.loc[pa_end] if len(pa_end) else pd.DataFrame()
+            evs = pa_df["events"].fillna("").astype(str) if not pa_df.empty and "events" in pa_df.columns else pd.Series(dtype=str)
+            h = int(evs.isin(["single","double","triple","home_run"]).sum())
+            hr = int((evs=="home_run").sum())
+            so = int(evs.isin(["strikeout","strikeout_double_play"]).sum())
+            bb = int(evs.isin(["walk","intent_walk"]).sum())
+            hbp = int((evs=="hit_by_pitch").sum())
+            non_ab = {"walk","intent_walk","hit_by_pitch","sac_fly","sac_bunt","catcher_interf"}
+            ab = int((~evs.isin(list(non_ab)) & evs.ne("")).sum())
+            pa = ab + bb + hbp
+            doubles = int((evs=="double").sum())
+            triples = int((evs=="triple").sum())
+            tb = h - hr - doubles - triples + 2*doubles + 3*triples + 4*hr
+            avg = h/ab if ab else None
+            obp = (h+bb+hbp)/pa if pa else None
+            slg = tb/ab if ab else None
+            ops = (obp or 0)+(slg or 0) if obp is not None and slg is not None else None
+            k_pct = so/pa*100 if pa else None
+            bb_pct = bb/pa*100 if pa else None
+            ev = float(safe_num(df["launch_speed"]).dropna().mean()) if "launch_speed" in df.columns else None
+            xwoba = float(safe_num(df["estimated_woba_using_speedangle"]).dropna().mean()) if "estimated_woba_using_speedangle" in df.columns else None
+            label = "vs LHP" if p_hand == "L" else "vs RHP"
+            return {"Split": label, "PA": pa, "K%": round(k_pct,1) if k_pct else np.nan,
+                    "BB%": round(bb_pct,1) if bb_pct else np.nan, "AVG": round(avg,3) if avg else np.nan,
+                    "OBP": round(obp,3) if obp else np.nan, "SLG": round(slg,3) if slg else np.nan,
+                    "OPS": round(ops,3) if ops else np.nan, "EV": round(ev,1) if ev else np.nan,
+                    "xwOBA": round(xwoba,3) if xwoba else np.nan}
+        sl = compute_platoon_splits_p(sc, "L")
+        sr = compute_platoon_splits_p(sc, "R")
+        sp_rows = [s for s in [sl, sr] if s is not None]
+        if sp_rows:
+            sp_df = pd.DataFrame(sp_rows)
+            sp_fmt = {"PA":"{:.0f}","K%":"{:.1f}","BB%":"{:.1f}","AVG":"{:.3f}","OBP":"{:.3f}","SLG":"{:.3f}","OPS":"{:.3f}","EV":"{:.1f}","xwOBA":"{:.3f}"}
+            st.dataframe(sp_df.style.format(sp_fmt, na_rep="—"), use_container_width=True, hide_index=True)
 
     with top_right:
         st.markdown("### QUICK TOTALS")
@@ -1043,101 +1215,137 @@ def main():
         c1.metric("Pitches Seen", f"{len(valid_pitch_rows(sc)):,}")
         c2.metric("Games", f"{sc['game_date'].nunique():,}" if "game_date" in sc.columns else "—")
 
-        c3, c4 = st.columns(2)
-        c3.metric("PA", str(prod.get("PA", "—")))
-        c4.metric("HR", str(prod.get("HR", "—")))
-
     st.divider()
 
-    # ── Plate Discipline ─────────────────────────────────────────────────────
-    st.markdown("## PLATE DISCIPLINE")
+    # ── Switch hitter toggle ──────────────────────────────────────────────────
+    batter_hand = None
+    if "stand" in sc.columns:
+        hands = sc["stand"].dropna().unique().tolist()
+        if len(hands) > 1:
+            batter_hand = st.radio("Batter side", ["All", "vs LHP", "vs RHP"], horizontal=True, key="batter_hand_toggle")
 
-    pd_overall = compute_plate_discipline(sc, "Overall")
-    pd_fb = compute_plate_discipline(valid_pitch_rows(sc)[valid_pitch_rows(sc)["pitch_group"]=="Fastballs"] if "pitch_group" in valid_pitch_rows(sc).columns else pd.DataFrame(), "Fastballs")
-    pd_br = compute_plate_discipline(valid_pitch_rows(sc)[valid_pitch_rows(sc)["pitch_group"]=="Breaking"] if "pitch_group" in valid_pitch_rows(sc).columns else pd.DataFrame(), "Breaking")
-    pd_os = compute_plate_discipline(valid_pitch_rows(sc)[valid_pitch_rows(sc)["pitch_group"]=="Offspeed"] if "pitch_group" in valid_pitch_rows(sc).columns else pd.DataFrame(), "Offspeed")
+    def filter_by_hand(df):
+        if batter_hand is None or batter_hand == "All" or "p_throws" not in df.columns:
+            return df
+        pt = "L" if batter_hand == "vs LHP" else "R"
+        return df[df["p_throws"] == pt].copy()
 
-    pd_rows = [r for r in [pd_overall, pd_fb, pd_br, pd_os] if r is not None]
-    if pd_rows:
-        pd_df = pd.DataFrame(pd_rows)
-        pd_fmt = {c: "{:.1f}" for c in pd_df.columns if c not in ["Group","Pitches"]}
-        pd_directions = {
-            "Zone%": "high_good",
-            "Swing%": "low_good",
-            "Z-Swing%": "high_good",
-            "Z-Contact%": "high_good",
-            "Chase%": "low_good",
-            "Whiff%": "low_good",
-            "Heart Swing%": "high_good",
-            "Heart Contact%": "high_good",
-        }
-        if league_compare and baselines:
-            st.dataframe(
-                style_red_green(pd_df, pd_directions, fmt_map=pd_fmt, baselines=baselines, group_col=None),
-                use_container_width=True, hide_index=True
-            )
-        else:
-            st.dataframe(pd_df.style.format(pd_fmt, na_rep="—"), use_container_width=True, hide_index=True)
+    sc_hand = filter_by_hand(sc)
 
-    st.divider()
+    # ── Bat Tracking ─────────────────────────────────────────────────────────
+    st.markdown("## BAT TRACKING + BATTED BALL")
 
-    # ── Batted Ball ───────────────────────────────────────────────────────────
-    st.markdown("## BATTED BALL")
+    # Compute bat tracking stats
+    def compute_bat_tracking(df):
+        out = {}
+        if "bat_speed" in df.columns:
+            bs = safe_num(df["bat_speed"]).dropna()
+            out["Bat Speed"] = round(float(bs.mean()), 1) if len(bs) else None
+            # Bat speed on BIP only
+            if "bb_type" in df.columns:
+                bip_mask = df["bb_type"].notna()
+                bs_bip = safe_num(df.loc[bip_mask, "bat_speed"]).dropna() if bip_mask.any() else pd.Series(dtype=float)
+                out["Bat Spd (BIP)"] = round(float(bs_bip.mean()), 1) if len(bs_bip) else None
+            # Fast swing rate: % of swings >= 75 mph
+            swing_mask = df["is_swing"] if "is_swing" in df.columns else pd.Series([False]*len(df))
+            bs_swings = safe_num(df.loc[swing_mask, "bat_speed"]).dropna() if swing_mask.any() else pd.Series(dtype=float)
+            out["Fast Swing%"] = round(float((bs_swings >= 75).mean() * 100), 1) if len(bs_swings) else None
+        if "swing_length" in df.columns:
+            sl = safe_num(df["swing_length"]).dropna()
+            out["Swing Length"] = round(float(sl.mean()), 1) if len(sl) else None
+        return out
 
-    r1 = st.columns(5)
-    r1[0].metric("Avg EV",    f"{bb.get('Avg EV','—')}")
-    r1[1].metric("90th EV",   f"{bb.get('90th EV','—')}")
-    r1[2].metric("Max EV",    f"{bb.get('Max EV','—')}")
-    r1[3].metric("Avg LA",    f"{bb.get('Avg LA','—')}")
-    r1[4].metric("Bat Speed", f"{bb.get('Bat Speed','—') or '—'}")
+    bt = compute_bat_tracking(sc_hand)
+    bb_hand = compute_batted_ball(sc_hand)
 
-    r2 = st.columns(5)
-    r2[0].metric("HardHit%",   f"{bb.get('HardHit%','—')}%" if bb.get('HardHit%') is not None else "—")
-    r2[1].metric("Barrel%",    f"{bb.get('Barrel%','—')}%" if bb.get('Barrel%') is not None else "—")
-    r2[2].metric("SweetSpot%", f"{bb.get('SweetSpot%','—')}%" if bb.get('SweetSpot%') is not None else "—")
-    r2[3].metric("AirPull%",   f"{bb.get('AirPull%','—')}%" if bb.get('AirPull%') is not None else "—")
-    r2[4].metric("GB%",        f"{bb.get('GB%','—')}%" if bb.get('GB%') is not None else "—")
+    # Build single Savant-style table
+    bat_row = {
+        "Bat Speed": bt.get("Bat Speed"),
+        "Bat Spd (BIP)": bt.get("Bat Spd (BIP)"),
+        "Swing Length": bt.get("Swing Length"),
+        "Fast Swing%": bt.get("Fast Swing%"),
+        "Avg EV": bb_hand.get("Avg EV"),
+        "90th EV": bb_hand.get("90th EV"),
+        "Max EV": bb_hand.get("Max EV"),
+        "Avg LA": bb_hand.get("Avg LA"),
+        "HardHit%": bb_hand.get("HardHit%"),
+        "Barrel%": bb_hand.get("Barrel%"),
+        "SweetSpot%": bb_hand.get("SweetSpot%"),
+        "AirPull%": bb_hand.get("AirPull%"),
+        "GB%": bb_hand.get("GB%"),
+        "LD%": bb_hand.get("LD%"),
+        "FB%": bb_hand.get("FB%"),
+    }
+    bat_df = pd.DataFrame([bat_row])
+    bat_fmt = {k: "{:.1f}" for k in bat_row if k not in ["Swing Length"]}
+    bat_fmt["Swing Length"] = "{:.1f}"
+    bat_directions = {
+        "Bat Speed": "high_good", "Bat Spd (BIP)": "high_good",
+        "Fast Swing%": "high_good", "Swing Length": "low_good",
+        "Avg EV": "high_good", "90th EV": "high_good", "Max EV": "high_good",
+        "Avg LA": "high_good",
+        "HardHit%": "high_good", "Barrel%": "high_good", "SweetSpot%": "high_good",
+        "AirPull%": "high_good", "GB%": "low_good", "LD%": "high_good", "FB%": "high_good",
+    }
+    if league_compare and baselines and "_ALL_" in baselines:
+        all_bl = baselines["_ALL_"]
+        sty = bat_df.style.format(bat_fmt, na_rep="—")
+        def _irp(a, b, t): return tuple(int(a[i]+t*(b[i]-a[i])) for i in range(3))
+        green = (64,160,92); red = (210,78,78); white = (255,255,255)
+        for col, dirn in bat_directions.items():
+            if col not in bat_df.columns: continue
+            mu_sd = all_bl.get(col, (None, None))
+            mu, sd = mu_sd if isinstance(mu_sd, tuple) else (None, None)
+            if mu is None or sd is None or pd.isna(mu) or pd.isna(sd) or sd == 0: continue
+            def _sf(val, mu=float(mu), sd=float(sd), dirn=dirn):
+                v = pd.to_numeric(val, errors="coerce")
+                if pd.isna(v): return ""
+                z = (float(v)-mu)/sd
+                if dirn == "low_good": z = -z
+                if abs(z) <= 0.35: return "background-color:rgb(255,255,255);color:black;"
+                z = float(np.clip(z,-2,2))
+                t = (z+2)/4
+                rgb = _irp(red,white,t/0.5) if t < 0.5 else _irp(white,green,(t-0.5)/0.5)
+                return f"background-color:rgb({rgb[0]},{rgb[1]},{rgb[2]});color:black;"
+            sty = sty.applymap(_sf, subset=[col])
+        st.dataframe(sty, use_container_width=True, hide_index=True)
+    else:
+        st.dataframe(bat_df.style.format(bat_fmt, na_rep="—"), use_container_width=True, hide_index=True)
 
-    r3 = st.columns(5)
-    r3[0].metric("LD%",  f"{bb.get('LD%','—')}%" if bb.get('LD%') is not None else "—")
-    r3[1].metric("FB%",  f"{bb.get('FB%','—')}%" if bb.get('FB%') is not None else "—")
-    r3[2].metric("PU%",  f"{bb.get('PU%','—')}%" if bb.get('PU%') is not None else "—")
-
-    # Stats vs hard fastballs
-    vp = valid_pitch_rows(sc)
-    if "pitch_group" in vp.columns and "release_speed" in vp.columns and "iVB_in" in vp.columns:
+    # Hard fastball splits
+    vp = valid_pitch_rows(sc_hand)
+    if "pitch_group" in vp.columns and "release_speed" in vp.columns:
         hard_fb = vp[(vp["pitch_group"]=="Fastballs") & (safe_num(vp["release_speed"]) >= 95)]
-        high_ivb_fb = vp[(vp["pitch_group"]=="Fastballs") & (safe_num(vp["iVB_in"]) >= 17)]
-
+        high_ivb_fb = vp[(vp["pitch_group"]=="Fastballs") & (safe_num(vp.get("iVB_in", pd.Series(dtype=float))) >= 17)] if "iVB_in" in vp.columns else pd.DataFrame()
         if not hard_fb.empty or not high_ivb_fb.empty:
             st.markdown("#### vs Hard Fastballs")
-            hfc1, hfc2 = st.columns(2)
-            with hfc1:
-                st.caption("vs 95+ MPH Fastballs")
+            hf_rows = []
+            if not hard_fb.empty:
                 hf_bb = compute_batted_ball(hard_fb)
                 hf_pd = compute_plate_discipline(hard_fb, "95+ FB")
-                m1, m2, m3, m4 = st.columns(4)
-                m1.metric("Pitches", len(hard_fb))
-                m2.metric("Whiff%", f"{hf_pd.get('Whiff%','—')}%" if hf_pd and hf_pd.get('Whiff%') else "—")
-                m3.metric("Avg EV", f"{hf_bb.get('Avg EV','—')}")
-                m4.metric("xwOBA", "—")
-            with hfc2:
-                st.caption("vs 17+ in. iVB Fastballs")
+                xwoba_hf = float(safe_num(hard_fb["estimated_woba_using_speedangle"]).dropna().mean()) if "estimated_woba_using_speedangle" in hard_fb.columns else None
+                hf_rows.append({"Split": "vs 95+ MPH FB", "Pitches": len(hard_fb),
+                    "Whiff%": round(hf_pd.get("Whiff%",0),1) if hf_pd and hf_pd.get("Whiff%") else None,
+                    "Avg EV": hf_bb.get("Avg EV"), "HardHit%": hf_bb.get("HardHit%"),
+                    "Barrel%": hf_bb.get("Barrel%"), "xwOBA": round(xwoba_hf,3) if xwoba_hf else None})
+            if not high_ivb_fb.empty:
                 hi_bb = compute_batted_ball(high_ivb_fb)
                 hi_pd = compute_plate_discipline(high_ivb_fb, "17+ iVB FB")
-                m1, m2, m3, m4 = st.columns(4)
-                m1.metric("Pitches", len(high_ivb_fb))
-                m2.metric("Whiff%", f"{hi_pd.get('Whiff%','—')}%" if hi_pd and hi_pd.get('Whiff%') else "—")
-                m3.metric("Avg EV", f"{hi_bb.get('Avg EV','—')}")
-                m4.metric("xwOBA", "—")
+                xwoba_hi = float(safe_num(high_ivb_fb["estimated_woba_using_speedangle"]).dropna().mean()) if "estimated_woba_using_speedangle" in high_ivb_fb.columns else None
+                hf_rows.append({"Split": "vs 17+ iVB FB", "Pitches": len(high_ivb_fb),
+                    "Whiff%": round(hi_pd.get("Whiff%",0),1) if hi_pd and hi_pd.get("Whiff%") else None,
+                    "Avg EV": hi_bb.get("Avg EV"), "HardHit%": hi_bb.get("HardHit%"),
+                    "Barrel%": hi_bb.get("Barrel%"), "xwOBA": round(xwoba_hi,3) if xwoba_hi else None})
+            if hf_rows:
+                hf_df = pd.DataFrame(hf_rows)
+                hf_fmt = {"Whiff%":"{:.1f}","Avg EV":"{:.1f}","HardHit%":"{:.1f}","Barrel%":"{:.1f}","xwOBA":"{:.3f}"}
+                st.dataframe(hf_df.style.format(hf_fmt, na_rep="—"), use_container_width=True, hide_index=True)
 
     st.divider()
 
-    # ── Pitch Type Stats ──────────────────────────────────────────────────────
-    st.markdown("## STATS BY PITCH TYPE")
-
-    pt_stats = compute_pitch_type_stats(sc)
-    pg_stats = compute_pitch_group_stats(sc)
+    # ── Stats by Pitch Type + Group ───────────────────────────────────────────
+    pt_stats = compute_pitch_type_stats(sc_hand)
+    pg_stats = compute_pitch_group_stats(sc_hand)
 
     pt_fmt = {
         "Pitch%": "{:.1f}", "Pitches": "{:.0f}",
@@ -1145,32 +1353,39 @@ def main():
         "Z-Swing%": "{:.1f}", "Z-Contact%": "{:.1f}",
         "Avg EV": "{:.1f}", "HardHit%": "{:.1f}", "Barrel%": "{:.1f}",
         "xwOBA": "{:.3f}",
+        "Heart Swing%": "{:.1f}", "Heart Contact%": "{:.1f}",
     }
     pt_directions = {
-        "Swing%": "low_good", "Whiff%": "high_good", "Chase%": "high_good",
-        "Z-Swing%": "low_good", "Z-Contact%": "low_good",
+        "Swing%": "high_good", "Whiff%": "low_good", "Chase%": "low_good",
+        "Z-Swing%": "high_good", "Z-Contact%": "high_good",
         "Avg EV": "high_good", "HardHit%": "high_good", "Barrel%": "high_good",
         "xwOBA": "high_good",
+        "Heart Swing%": "high_good", "Heart Contact%": "high_good",
     }
 
+    # Also add plate discipline (with heart stats) by group
+    pd_overall = compute_plate_discipline(sc_hand, "Overall")
+    pd_fb = compute_plate_discipline(valid_pitch_rows(sc_hand)[valid_pitch_rows(sc_hand)["pitch_group"]=="Fastballs"] if "pitch_group" in valid_pitch_rows(sc_hand).columns else pd.DataFrame(), "Fastballs")
+    pd_br = compute_plate_discipline(valid_pitch_rows(sc_hand)[valid_pitch_rows(sc_hand)["pitch_group"]=="Breaking"] if "pitch_group" in valid_pitch_rows(sc_hand).columns else pd.DataFrame(), "Breaking")
+    pd_os = compute_plate_discipline(valid_pitch_rows(sc_hand)[valid_pitch_rows(sc_hand)["pitch_group"]=="Offspeed"] if "pitch_group" in valid_pitch_rows(sc_hand).columns else pd.DataFrame(), "Offspeed")
+    pd_rows = [r for r in [pd_fb, pd_br, pd_os, pd_overall] if r is not None]
+    pd_directions = {
+        "Zone%": "high_good", "Swing%": "low_good", "Z-Swing%": "high_good",
+        "Z-Contact%": "high_good", "Chase%": "low_good", "Whiff%": "low_good",
+        "Heart Swing%": "high_good", "Heart Contact%": "high_good",
+    }
+
+    st.markdown("## STATS BY PITCH TYPE")
     st.markdown("### By Pitch Type")
     if not pt_stats.empty:
-        if league_compare and baselines:
-            st.dataframe(
-                style_red_green(pt_stats, pt_directions, fmt_map=pt_fmt, group_col="Pitch", baselines=baselines),
-                use_container_width=True, hide_index=True
-            )
-        else:
-            st.dataframe(pt_stats.style.format(pt_fmt, na_rep="—"), use_container_width=True, hide_index=True)
+        st.dataframe(pt_stats.style.format(pt_fmt, na_rep="—"), use_container_width=True, hide_index=True)
 
     st.markdown("### By Pitch Group")
     if not pg_stats.empty:
         pg_fmt = {k: v for k, v in pt_fmt.items() if k != "Pitch%"}
         if league_compare and baselines:
-            st.dataframe(
-                style_red_green(pg_stats, pt_directions, fmt_map=pg_fmt, group_col="Group", baselines=baselines),
-                use_container_width=True, hide_index=True
-            )
+            st.dataframe(style_red_green(pg_stats, pt_directions, fmt_map=pg_fmt, group_col="Group", baselines=baselines),
+                         use_container_width=True, hide_index=True)
         else:
             st.dataframe(pg_stats.style.format(pg_fmt, na_rep="—"), use_container_width=True, hide_index=True)
 
