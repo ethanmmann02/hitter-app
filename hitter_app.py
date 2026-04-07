@@ -975,7 +975,20 @@ def main():
             s = normalize_name(search)
             filtered = hitter_df[hitter_df["display_norm"].str.contains(s, na=False)].copy()
             if filtered.empty:
-                filtered = hitter_df
+                try:
+                    import requests as _req
+                    r = _req.get("https://statsapi.mlb.com/api/v1/sports/1/players?season=2026", timeout=10)
+                    mlb_players = r.json().get("people", [])
+                    mlb_rows = []
+                    for p in mlb_players:
+                        pid = p.get("id")
+                        name = p.get("fullName", "")
+                        if pid and name and s in normalize_name(name):
+                            mlb_rows.append({"key_mlbam": pid, "key_fangraphs": None,
+                                            "display": name, "display_norm": normalize_name(name)})
+                    filtered = pd.DataFrame(mlb_rows) if mlb_rows else hitter_df
+                except Exception:
+                    filtered = hitter_df
 
         manual_mlbam = st.text_input("Manual MLBAM ID (optional)", value="")
         manual_id    = pd.to_numeric(manual_mlbam, errors="coerce")
@@ -996,7 +1009,7 @@ def main():
             fg_id = None
         else:
             selected_display = st.selectbox("Hitter", options=filtered["display"].tolist(), index=0)
-            row = hitter_df.loc[hitter_df["display"] == selected_display].iloc[0]
+            row = filtered.loc[filtered["display"] == selected_display].iloc[0]
             mlbam_id    = int(row["key_mlbam"])
             fg_id       = int(row["key_fangraphs"]) if pd.notna(row.get("key_fangraphs")) else None
             if use_manual_fg:
@@ -1128,9 +1141,15 @@ def main():
         if ssdf.empty:
             st.info("No season summary available.")
         else:
-            fmt_all = {"PA":"{:.0f}","AVG":"{:.3f}","OBP":"{:.3f}","SLG":"{:.3f}","OPS":"{:.3f}",
-                   "K%":"{:.1f}","BB%":"{:.1f}","wOBA":"{:.3f}","xwOBA":"{:.3f}"}
-            fmt = {k: v for k, v in fmt_all.items() if k in ssdf.columns and pd.to_numeric(ssdf[k], errors="coerce").notna().any()}
+            def _safe_fmt(fmt_str):
+                def _f(x):
+                    try: return fmt_str.format(float(x))
+                    except: return str(x) if x not in [None, ""] else "—"
+                return _f
+            fmt = {"PA":_safe_fmt("{:.0f}"),"AVG":_safe_fmt("{:.3f}"),"OBP":_safe_fmt("{:.3f}"),
+                   "SLG":_safe_fmt("{:.3f}"),"OPS":_safe_fmt("{:.3f}"),"K%":_safe_fmt("{:.1f}"),
+                   "BB%":_safe_fmt("{:.1f}"),"wOBA":_safe_fmt("{:.3f}"),"xwOBA":_safe_fmt("{:.3f}")}
+            fmt = {k: v for k, v in fmt.items() if k in ssdf.columns}
             st.dataframe(ssdf.style.format(fmt, na_rep="—"), use_container_width=True, hide_index=True)
 
         st.caption("FanGraphs + Statcast (xwOBA).")
