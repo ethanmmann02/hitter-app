@@ -295,14 +295,13 @@ def fetch_statcast_league(start_date, end_date, allowed_gt):
     df = filter_game_types(df, set(allowed_gt))
     return df
 
+@st.cache_data(ttl=3600, show_spinner=False)
 def fetch_fg_batting_year(year):
-    def _build():
-        try:
-            df = batting_stats(year, qual=0)
-            return pd.DataFrame(df) if df is not None else pd.DataFrame()
-        except Exception:
-            return pd.DataFrame()
-    return memo_by_params("fg_batting_v11", (APP_VERSION, year), _build)
+    try:
+        df = batting_stats(year, qual=0)
+        return pd.DataFrame(df) if df is not None else pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
 
 # =========================================================
 # Feature engineering
