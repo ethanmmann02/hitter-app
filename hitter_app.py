@@ -237,6 +237,28 @@ def load_hitter_dropdown():
     reg = reg[reg["display"].astype(str).str.len() > 0].copy()
     reg = reg.drop_duplicates(subset=["display", "key_mlbam"], keep="first")
 
+    # Add 2026 MLB players directly so rookies always appear
+    try:
+        import requests as _req2
+        r2 = _req2.get("https://statsapi.mlb.com/api/v1/sports/1/players?season=2026", timeout=10)
+        mlb26 = r2.json().get("people", [])
+        mlb26_rows = []
+        for p in mlb26:
+            pid = p.get("id")
+            name = p.get("fullName", "")
+            pos = p.get("primaryPosition", {}).get("type", "")
+            if pid and name and pos != "Pitcher":
+                mlb26_rows.append({"key_mlbam": pid, "key_fangraphs": pd.NA,
+                                   "display": name, "display_norm": normalize_name(name)})
+        if mlb26_rows:
+            mlb26_df = pd.DataFrame(mlb26_rows)
+            mlb26_df["key_mlbam"] = pd.array(mlb26_df["key_mlbam"].tolist(), dtype="Int64")
+            mlb26_df["key_fangraphs"] = pd.array([pd.NA]*len(mlb26_df), dtype="Int64")
+            reg = pd.concat([mlb26_df, reg], ignore_index=True)
+            reg = reg.drop_duplicates(subset=["key_mlbam"], keep="first")
+    except Exception:
+        pass
+
     # Filter to 2023+ batters only via FanGraphs batting stats
     try:
         from pybaseball import batting_stats as _bat_stats
