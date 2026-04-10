@@ -781,7 +781,7 @@ def build_season_summary(fg_id, mlbam_id, display_name, current_year, allowed_gt
             "PA": pa,
             "AVG": avg, "OBP": obp, "SLG": slg, "OPS": ops,
             "K%": k_pct, "BB%": bb_pct,
-            "wOBA": woba_sc, "xwOBA": xwoba_sc,
+            "xwOBA": xwoba_sc,
         })
 
     return pd.DataFrame(rows)
