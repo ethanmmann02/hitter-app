@@ -298,9 +298,22 @@ def fetch_statcast_league(start_date, end_date, allowed_gt):
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_fg_batting_year(year):
     try:
+        import pybaseball as pyb
+        # Set user agent to avoid blocks
         df = batting_stats(year, qual=0)
         return pd.DataFrame(df) if df is not None else pd.DataFrame()
-    except Exception:
+    except Exception as e:
+        # Try direct FanGraphs URL as fallback
+        try:
+            import requests, io
+            url = f"https://www.fangraphs.com/api/leaders/major-league/data?age=0&pos=all&stats=bat&lg=all&qual=0&season={year}&season1={year}&startdate=&enddate=&month=0&hand=&team=0&pageitems=500&pagenum=1&ind=0&rost=0&players=0&type=8&postseason=&sortdir=default&sortstat=WAR"
+            headers = {{"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}}
+            r = requests.get(url, headers=headers, timeout=30)
+            data = r.json()
+            if "data" in data:
+                return pd.DataFrame(data["data"])
+        except Exception:
+            pass
         return pd.DataFrame()
 
 # =========================================================
