@@ -1001,7 +1001,7 @@ def main():
         today = dt.date.today()
         default_year = today.year
 
-        season_year = st.selectbox("Season year", options=[2026, 2025], index=0)
+        season_year = st.selectbox("Season year", options=[2026], index=0)
 
         if use_manual:
             mlbam_id    = int(manual_id)
