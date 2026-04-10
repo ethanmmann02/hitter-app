@@ -1183,7 +1183,7 @@ def main():
             fmt = {k: v for k, v in fmt.items() if k in ssdf.columns}
             st.dataframe(ssdf.style.format(fmt, na_rep="—"), use_container_width=True, hide_index=True)
 
-        st.caption("FanGraphs + Statcast (xwOBA).")
+        st.caption("Statcast data.")
 
         # Platoon splits
         st.markdown("#### Platoon Splits")
