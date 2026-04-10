@@ -1326,7 +1326,7 @@ def main():
                 t = (z+2)/4
                 rgb = _irp(red,white,t/0.5) if t < 0.5 else _irp(white,green,(t-0.5)/0.5)
                 return f"background-color:rgb({rgb[0]},{rgb[1]},{rgb[2]});color:black;"
-            sty = sty.applymap(_sf, subset=[col])
+            sty = sty.map(_sf, subset=[col])
         st.dataframe(sty, use_container_width=True, hide_index=True)
     else:
         st.dataframe(bat_df.style.format(bat_fmt, na_rep="—"), use_container_width=True, hide_index=True)
