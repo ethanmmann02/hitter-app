@@ -718,51 +718,48 @@ def build_season_summary(fg_id, mlbam_id, display_name, current_year, allowed_gt
     years = [2026, 2025]
     rows = []
     for yr in years:
-        fg = fetch_fg_batting_year(yr)
-        row = {}
-        if not fg.empty:
-            name_cols = [c for c in ["Name","name"] if c in fg.columns]
-            if name_cols:
-                fg["_norm"] = fg[name_cols[0]].map(normalize_name)
-            id_cols = [c for c in ["IDfg","idfg","playerid"] if c in fg.columns]
-            if id_cols:
-                x = pd.to_numeric(fg[id_cols[0]], errors="coerce")
-                hit = fg[x == float(fg_id)] if fg_id else pd.DataFrame()
-                if hit.empty and name_cols:
-                    dn = normalize_name(display_name)
-                    hit = fg[fg["_norm"] == dn]
-                if not hit.empty:
-                    row = hit.iloc[0].to_dict()
-
-        def _n(k): return pd.to_numeric(row.get(k, np.nan), errors="coerce")
-
-        # Also get xwOBA from Statcast
-        xwoba_sc = None
+        # Compute all stats from Statcast directly
         try:
             s, e = season_window(yr)
             sc_y = fetch_statcast_batter(mlbam_id, s, e, allowed_gt={"R"})
-            if sc_y is not None and not sc_y.empty and "estimated_woba_using_speedangle" in sc_y.columns:
-                xw = safe_num(sc_y["estimated_woba_using_speedangle"]).dropna()
-                xwoba_sc = round(float(xw.mean()), 3) if len(xw) else None
         except Exception:
-            pass
+            sc_y = None
 
-        ip = _n("PA")
-        k_raw = _n("K%")
-        bb_raw = _n("BB%")
-        k_pct = round(float(k_raw)*100, 1) if pd.notna(k_raw) and float(k_raw) <= 1.0 else (round(float(k_raw),1) if pd.notna(k_raw) else np.nan)
-        bb_pct = round(float(bb_raw)*100, 1) if pd.notna(bb_raw) and float(bb_raw) <= 1.0 else (round(float(bb_raw),1) if pd.notna(bb_raw) else np.nan)
+        if sc_y is not None and not sc_y.empty:
+            # Get PA ends
+            pa_end = sc_y.groupby(["game_pk","at_bat_number"])["pitch_number"].idxmax() if require_cols(sc_y,["game_pk","at_bat_number","pitch_number"]) else pd.Index([])
+            pa_df = sc_y.loc[pa_end] if len(pa_end) else pd.DataFrame()
+            evs = pa_df["events"].fillna("").astype(str) if not pa_df.empty and "events" in pa_df.columns else pd.Series(dtype=str)
+            h = int(evs.isin(["single","double","triple","home_run"]).sum())
+            hr = int((evs=="home_run").sum())
+            so = int(evs.isin(["strikeout","strikeout_double_play"]).sum())
+            bb = int(evs.isin(["walk","intent_walk"]).sum())
+            hbp = int((evs=="hit_by_pitch").sum())
+            non_ab = {"walk","intent_walk","hit_by_pitch","sac_fly","sac_bunt","catcher_interf"}
+            ab = int((~evs.isin(list(non_ab)) & evs.ne("")).sum())
+            pa = ab + bb + hbp
+            doubles = int((evs=="double").sum())
+            triples = int((evs=="triple").sum())
+            tb = h - hr - doubles - triples + 2*doubles + 3*triples + 4*hr
+            avg = round(h/ab, 3) if ab else np.nan
+            obp = round((h+bb+hbp)/pa, 3) if pa else np.nan
+            slg = round(tb/ab, 3) if ab else np.nan
+            ops = round((obp or 0)+(slg or 0), 3) if not np.isnan(obp) and not np.isnan(slg) else np.nan
+            k_pct = round(so/pa*100, 1) if pa else np.nan
+            bb_pct = round(bb/pa*100, 1) if pa else np.nan
+            xwoba_sc = float(safe_num(sc_y["estimated_woba_using_speedangle"]).dropna().mean()) if "estimated_woba_using_speedangle" in sc_y.columns else np.nan
+            xwoba_sc = round(xwoba_sc, 3) if pd.notna(xwoba_sc) else np.nan
+            # wOBA approximation from Statcast
+            woba_sc = xwoba_sc  # use xwOBA as proxy
+        else:
+            pa = "—"; avg = obp = slg = ops = k_pct = bb_pct = woba_sc = xwoba_sc = np.nan
+
         rows.append({
             "Season": yr,
-            "PA": int(ip) if pd.notna(ip) else "—",
-            "AVG": round(float(_n("AVG")), 3) if pd.notna(_n("AVG")) else np.nan,
-            "OBP": round(float(_n("OBP")), 3) if pd.notna(_n("OBP")) else np.nan,
-            "SLG": round(float(_n("SLG")), 3) if pd.notna(_n("SLG")) else np.nan,
-            "OPS": round(float(_n("OPS")), 3) if pd.notna(_n("OPS")) else np.nan,
-            "K%": k_pct,
-            "BB%": bb_pct,
-            "wOBA": round(float(_n("wOBA")), 3) if pd.notna(_n("wOBA")) else np.nan,
-            "xwOBA": xwoba_sc if xwoba_sc else np.nan,
+            "PA": pa,
+            "AVG": avg, "OBP": obp, "SLG": slg, "OPS": ops,
+            "K%": k_pct, "BB%": bb_pct,
+            "wOBA": woba_sc, "xwOBA": xwoba_sc,
         })
 
     return pd.DataFrame(rows)
